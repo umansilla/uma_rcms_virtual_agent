@@ -2,8 +2,16 @@ import os
 import json
 import asyncio
 import jwt
+import logging
+from datetime import datetime, timezone
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 import websockets
+
+# Configuración básica de logging para ver los mensajes en consola
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
 
 app = FastAPI()
 
@@ -12,47 +20,63 @@ OPENAI_WS_URL = "wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview"
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 AVAYA_SECRET_KEY = os.getenv("AVAYA_SECRET_KEY")
 
+def get_current_timestamp():
+    """Genera el timestamp en el formato requerido por Avaya ISO-8601 UTC."""
+    return datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.000Z')
 
 def verificar_token_avaya(auth_header: str):
     """
     Verifica el token JWT enviado por Avaya en el upgrade request.
     """
+    logging.info("Verificando token JWT de Avaya...")
     if not auth_header or not auth_header.startswith("Bearer "):
+        logging.error("Fallo de autenticación: Token faltante o formato incorrecto.")
         raise HTTPException(status_code=401, detail="Token faltante o inválido")
     
     token = auth_header.split(" ")[1]
     try:
         # Validación del JWT usando la clave de seguridad (Fase 1 usa HS256)
         payload = jwt.decode(token, AVAYA_SECRET_KEY, algorithms=["HS256"])
+        logging.info("Token de Avaya verificado exitosamente.")
         return payload
     except jwt.ExpiredSignatureError:
+        logging.error("Fallo de autenticación: El token ha expirado.")
         raise HTTPException(status_code=401, detail="Token expirado")
     except jwt.InvalidTokenError:
+        logging.error("Fallo de autenticación: Token inválido.")
         raise HTTPException(status_code=401, detail="Token inválido")
 
 async def open_openai_connection():
     """
     Establece la conexión como cliente hacia el WebSocket de OpenAI Realtime.
     """
+    logging.info(f"Iniciando conexión con OpenAI en {OPENAI_WS_URL}...")
     headers = {
         "Authorization": f"Bearer {OPENAI_API_KEY}",
         "OpenAI-Beta": "realtime=v1"
     }
-    return await websockets.connect(OPENAI_WS_URL, additional_headers=headers)
+    ws = await websockets.connect(OPENAI_WS_URL, additional_headers=headers)
+    logging.info("Conexión con OpenAI establecida correctamente.")
+    return ws
 
 @app.websocket("/avaya-rcms")
 async def avaya_rcms_endpoint(websocket: WebSocket):
+    logging.info("NUEVA CONEXIÓN: Recibiendo solicitud WebSocket de Avaya.")
+    
     # 1. Autenticación (Validar JWT en los headers antes de aceptar)
     auth_header = websocket.headers.get("authorization")
     try:
         verificar_token_avaya(auth_header)
         await websocket.accept()
+        logging.info("Conexión WebSocket con Avaya ACEPTADA.")
     except Exception as e:
+        logging.error(f"Rechazando conexión WebSocket: {str(e)}")
         await websocket.close(code=1008) # Policy Violation
         return
 
     openai_ws = None
     session_id = None
+    sequence_num = 1 # Para responder con sequence numbers dinámicos
 
     try:
         # 2. Conectar a OpenAI
@@ -60,36 +84,48 @@ async def avaya_rcms_endpoint(websocket: WebSocket):
 
         # Tarea en segundo plano para leer desde OpenAI y enviar a Avaya
         async def receive_from_openai():
+            logging.info("Iniciando listener para recibir mensajes de OpenAI...")
             async for openai_message in openai_ws:
                 data = json.loads(openai_message)
+                
                 # Si OpenAI envía audio, lo empaquetamos en el formato 'media' de Avaya
                 if data.get("type") == "response.audio.delta":
+                    # Nota: Cambiamos a logging.debug para no inundar la consola con cada frame de audio
+                    logging.debug("Audio recibido de OpenAI, reenviando a Avaya.")
                     avaya_media_msg = {
                         "type": "media",
-                        "bid": 0, # Reemplazar con el Bearer ID correcto del session.start
+                        "bid": 0, # Reemplazar con el Bearer ID correcto
                         "src": "rx",
                         "audio": data["delta"] # OpenAI envía base64
                     }
                     await websocket.send_text(json.dumps(avaya_media_msg))
+                elif data.get("type") != "response.audio.delta":
+                    # Log para ver otros eventos de OpenAI (transcripciones, status, etc.)
+                    logging.info(f"Evento de OpenAI recibido: {data.get('type')}")
 
         asyncio.create_task(receive_from_openai())
 
         # 3. Bucle principal: Leer desde Avaya y procesar
+        logging.info("Iniciando bucle principal para escuchar mensajes de Avaya...")
         while True:
             avaya_message = await websocket.receive_text()
             data = json.loads(avaya_message)
             msg_type = data.get("type")
 
+            # Evitamos registrar cada paquete "media" como INFO para no saturar los logs
+            if msg_type != "media":
+                logging.info(f"Avaya -> Servidor: Recibido evento '{msg_type}'")
+
             if msg_type == "session.start":
                 session_id = data.get("sessionId")
-                # Responder a Avaya aceptando la sesión y configurando base64
-                # Nota: Avaya requiere millisecond granularity para el timestamp
+                logging.info(f"Configurando nueva sesión. SessionId: {session_id}")
+                
                 response = {
                     "version": "1.0.0",
                     "type": "session.started",
                     "sessionId": session_id,
-                    "sequenceNum": 1,
-                    "timestamp": "2025-01-10T22:40:31.000Z", # Generar dinámicamente
+                    "sequenceNum": sequence_num,
+                    "timestamp": get_current_timestamp(),
                     "payload": {
                         "services": ["bot"],
                         "mediaTransport": {
@@ -100,23 +136,27 @@ async def avaya_rcms_endpoint(websocket: WebSocket):
                     }
                 }
                 await websocket.send_text(json.dumps(response))
+                logging.info(f"Servidor -> Avaya: Enviado 'session.started' (SeqNum: {sequence_num})")
+                sequence_num += 1
 
             elif msg_type == "bot.start":
-                # Confirmar el inicio del bot
+                logging.info(f"Iniciando Bot para el endpoint: {data['payload'].get('endpointId')}")
                 response = {
                     "version": "1.0.0",
                     "type": "bot.started",
                     "sessionId": session_id,
-                    "sequenceNum": 2,
-                    "timestamp": "2025-01-10T22:40:31.000Z",
+                    "sequenceNum": sequence_num,
+                    "timestamp": get_current_timestamp(),
                     "payload": {
                         "endpointId": data["payload"]["endpointId"]
                     }
                 }
                 await websocket.send_text(json.dumps(response))
+                logging.info(f"Servidor -> Avaya: Enviado 'bot.started' (SeqNum: {sequence_num})")
+                sequence_num += 1
 
             elif msg_type == "media":
-                # Extraer audio base64 de Avaya y enviarlo a OpenAI
+                logging.debug("Audio recibido de Avaya, reenviando a OpenAI.")
                 audio_base64 = data.get("audio")
                 if audio_base64:
                     openai_audio_msg = {
@@ -124,14 +164,22 @@ async def avaya_rcms_endpoint(websocket: WebSocket):
                         "audio": audio_base64
                     }
                     await openai_ws.send(json.dumps(openai_audio_msg))
+                    
+            elif msg_type in ["session.end", "bot.end"]:
+                logging.info(f"Solicitud de finalización recibida: {msg_type}")
+                # Aquí idealmente enviarías un session.ended o bot.ended de respuesta
 
     except WebSocketDisconnect:
-        print(f"Desconexión de Avaya para la sesión {session_id}")
+        logging.warning(f"Desconexión del WebSocket de Avaya (Sesión: {session_id})")
+    except Exception as e:
+        logging.error(f"Error inesperado en la sesión {session_id}: {str(e)}")
     finally:
+        logging.info("Limpiando recursos y cerrando conexiones.")
         if openai_ws:
             await openai_ws.close()
+            logging.info("Conexión con OpenAI cerrada.")
 
 if __name__ == "__main__":
     import uvicorn
-    # En producción, asegúrate de configurar TLS/WSS en tu servidor proxy o directamente aquí
+    logging.info("Iniciando servidor Uvicorn...")
     uvicorn.run(app, host="0.0.0.0", port=8000)
