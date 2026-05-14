@@ -4,7 +4,8 @@ import asyncio
 import jwt
 import logging
 from datetime import datetime, timezone
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
+# ¡Aquí está la corrección! Añadimos Request
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Request
 import websockets
 
 # Configuración básica de logging para ver los mensajes en consola
@@ -72,8 +73,8 @@ async def debug_http_get(request: Request, path: str = ""):
 @app.websocket("/avaya-rcms")
 @app.websocket("/avaya-rcms/")
 @app.websocket("/{path:path}") # Atrapa cualquier otra ruta WebSocket
-async def avaya_rcms_endpoint(websocket: WebSocket):
-    logging.info("NUEVA CONEXIÓN: Recibiendo solicitud WebSocket de Avaya.")
+async def avaya_rcms_endpoint(websocket: WebSocket, path: str = ""):
+    logging.info(f"NUEVA CONEXIÓN: Recibiendo solicitud WebSocket de Avaya en la ruta: /{path}")
     
     # 1. Autenticación (Validar JWT en los headers antes de aceptar)
     auth_header = websocket.headers.get("authorization")
