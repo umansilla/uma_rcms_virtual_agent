@@ -59,7 +59,19 @@ async def open_openai_connection():
     logging.info("Conexión con OpenAI establecida correctamente.")
     return ws
 
+# 1. Endpoints HTTP de depuración (Por si la petición pierde el formato WebSocket)
+@app.get("/avaya-rcms")
+@app.get("/avaya-rcms/")
+@app.get("/{path:path}") # Atrapa cualquier otra ruta HTTP
+async def debug_http_get(request: Request, path: str = ""):
+    logging.warning(f"¡Atención! Petición HTTP GET recibida en lugar de WebSocket en la ruta: /{path}")
+    logging.warning(f"Headers recibidos: {request.headers}")
+    return {"error": "Este endpoint espera una conexión WebSocket, no HTTP convencional."}
+
+# 2. Endpoints WebSocket (Con catch-all para ver si Avaya pide otra ruta)
 @app.websocket("/avaya-rcms")
+@app.websocket("/avaya-rcms/")
+@app.websocket("/{path:path}") # Atrapa cualquier otra ruta WebSocket
 async def avaya_rcms_endpoint(websocket: WebSocket):
     logging.info("NUEVA CONEXIÓN: Recibiendo solicitud WebSocket de Avaya.")
     
