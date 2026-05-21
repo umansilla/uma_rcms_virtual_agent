@@ -15,7 +15,7 @@ logging.basicConfig(
 
 app = FastAPI()
 
-# 1. MODIFICACIÓN: Uso de la versión fechada del modelo (snapshot)
+# Mantenemos el modelo con el snapshot de diciembre, que es la versión estable
 OPENAI_WS_URL = "wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-12-17"
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 AVAYA_SECRET_KEY = os.getenv("AVAYA_SECRET_KEY")
@@ -49,10 +49,9 @@ async def open_openai_connection():
     """
     logging.info(f"Iniciando conexión con OpenAI en {OPENAI_WS_URL}...")
     
-    # 2. MODIFICACIÓN: Se restaura el header OpenAI-Beta
+    # CORRECCIÓN: Se elimina el header OpenAI-Beta porque el modelo 2024-12-17 lo prohíbe
     headers = {
-        "Authorization": f"Bearer {OPENAI_API_KEY}",
-        "OpenAI-Beta": "realtime=v1" 
+        "Authorization": f"Bearer {OPENAI_API_KEY}"
     }
     
     ws = await websockets.connect(OPENAI_WS_URL, additional_headers=headers)
