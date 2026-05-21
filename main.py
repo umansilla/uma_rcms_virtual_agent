@@ -15,8 +15,8 @@ logging.basicConfig(
 
 app = FastAPI()
 
-# Configuración mediante variables de entorno para mayor seguridad en Render
-OPENAI_WS_URL = "wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview"
+# 1. MODIFICACIÓN: Uso de la versión fechada del modelo (snapshot)
+OPENAI_WS_URL = "wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-12-17"
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 AVAYA_SECRET_KEY = os.getenv("AVAYA_SECRET_KEY")
 
@@ -48,15 +48,18 @@ async def open_openai_connection():
     Establece la conexión como cliente hacia el WebSocket de OpenAI Realtime.
     """
     logging.info(f"Iniciando conexión con OpenAI en {OPENAI_WS_URL}...")
+    
+    # 2. MODIFICACIÓN: Se restaura el header OpenAI-Beta
     headers = {
-        "Authorization": f"Bearer {OPENAI_API_KEY}"
-        # SE ELIMINÓ EL HEADER: "OpenAI-Beta": "realtime=v1" DEBIDO A SU DEPRECIACIÓN
+        "Authorization": f"Bearer {OPENAI_API_KEY}",
+        "OpenAI-Beta": "realtime=v1" 
     }
+    
     ws = await websockets.connect(OPENAI_WS_URL, additional_headers=headers)
     logging.info("Conexión con OpenAI establecida correctamente.")
     return ws
 
-# 1. Endpoints HTTP de depuración (Por si la petición pierde el formato WebSocket)
+# Endpoints HTTP de depuración (Por si la petición pierde el formato WebSocket)
 @app.get("/avaya-rcms")
 @app.get("/avaya-rcms/")
 @app.get("/{path:path}") # Atrapa cualquier otra ruta HTTP
@@ -65,7 +68,7 @@ async def debug_http_get(request: Request, path: str = ""):
     logging.warning(f"Headers recibidos: {request.headers}")
     return {"error": "Este endpoint espera una conexión WebSocket, no HTTP convencional."}
 
-# 2. Endpoints WebSocket (Con catch-all para ver si Avaya pide otra ruta)
+# Endpoints WebSocket (Con catch-all para ver si Avaya pide otra ruta)
 @app.websocket("/avaya-rcms")
 @app.websocket("/avaya-rcms/")
 @app.websocket("/{path:path}") 
