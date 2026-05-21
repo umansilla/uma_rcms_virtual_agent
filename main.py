@@ -48,8 +48,8 @@ async def open_openai_connection():
         "Authorization": f"Bearer {OPENAI_API_KEY}",
         "OpenAI-Beta": "realtime=v1"
     }
-    # CORRECCIÓN 1: Se usa extra_headers en lugar de additional_headers
-    ws = await websockets.connect(OPENAI_WS_URL, extra_headers=headers)
+    # CORRECCIÓN VITAL: Volvemos a usar 'additional_headers' para compatibilidad con websockets >= 14.0
+    ws = await websockets.connect(OPENAI_WS_URL, additional_headers=headers)
     logging.info("Conexión con OpenAI establecida correctamente.")
     return ws
 
@@ -105,7 +105,7 @@ async def avaya_rcms_endpoint(websocket: WebSocket, path: str = ""):
 
         logging.info("Iniciando bucle principal para escuchar mensajes de Avaya...")
         
-        # CORRECCIÓN 2: Instancia para procesar Batching de Avaya
+        # Instancia para procesar el Batching de Avaya correctamente sin crashear
         decoder = json.JSONDecoder()
         
         while True:
