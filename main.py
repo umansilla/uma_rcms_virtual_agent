@@ -15,7 +15,7 @@ logging.basicConfig(
 
 app = FastAPI()
 
-# Configuración mediante variables de entorno
+# Configuración mediante variables de entorno para mayor seguridad en Render
 OPENAI_WS_URL = "wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview"
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 AVAYA_SECRET_KEY = os.getenv("AVAYA_SECRET_KEY")
@@ -32,6 +32,7 @@ def verificar_token_avaya(auth_header: str):
     
     token = auth_header.split(" ")[1]
     try:
+        # Validación del JWT usando la clave de seguridad (Fase 1 usa HS256)
         payload = jwt.decode(token, AVAYA_SECRET_KEY, algorithms=["HS256"])
         logging.info("Token de Avaya verificado exitosamente.")
         return payload
@@ -43,27 +44,31 @@ def verificar_token_avaya(auth_header: str):
         raise HTTPException(status_code=401, detail="Token inválido")
 
 async def open_openai_connection():
+    """
+    Establece la conexión como cliente hacia el WebSocket de OpenAI Realtime.
+    """
     logging.info(f"Iniciando conexión con OpenAI en {OPENAI_WS_URL}...")
     headers = {
-        "Authorization": f"Bearer {OPENAI_API_KEY}",
-        "OpenAI-Beta": "realtime=v1"
+        "Authorization": f"Bearer {OPENAI_API_KEY}"
+        # SE ELIMINÓ EL HEADER: "OpenAI-Beta": "realtime=v1" DEBIDO A SU DEPRECIACIÓN
     }
-    # CORRECCIÓN VITAL: Volvemos a usar 'additional_headers' para compatibilidad con websockets >= 14.0
     ws = await websockets.connect(OPENAI_WS_URL, additional_headers=headers)
     logging.info("Conexión con OpenAI establecida correctamente.")
     return ws
 
+# 1. Endpoints HTTP de depuración (Por si la petición pierde el formato WebSocket)
 @app.get("/avaya-rcms")
 @app.get("/avaya-rcms/")
-@app.get("/{path:path}")
+@app.get("/{path:path}") # Atrapa cualquier otra ruta HTTP
 async def debug_http_get(request: Request, path: str = ""):
     logging.warning(f"¡Atención! Petición HTTP GET recibida en lugar de WebSocket en la ruta: /{path}")
     logging.warning(f"Headers recibidos: {request.headers}")
     return {"error": "Este endpoint espera una conexión WebSocket, no HTTP convencional."}
 
+# 2. Endpoints WebSocket (Con catch-all para ver si Avaya pide otra ruta)
 @app.websocket("/avaya-rcms")
 @app.websocket("/avaya-rcms/")
-@app.websocket("/{path:path}")
+@app.websocket("/{path:path}") 
 async def avaya_rcms_endpoint(websocket: WebSocket, path: str = ""):
     logging.info(f"NUEVA CONEXIÓN: Recibiendo solicitud WebSocket de Avaya en la ruta: /{path}")
     
@@ -93,7 +98,7 @@ async def avaya_rcms_endpoint(websocket: WebSocket, path: str = ""):
                     logging.debug("Audio recibido de OpenAI, reenviando a Avaya.")
                     avaya_media_msg = {
                         "type": "media",
-                        "bid": 0,
+                        "bid": 0, 
                         "src": "rx",
                         "audio": data["delta"] 
                     }
@@ -105,7 +110,7 @@ async def avaya_rcms_endpoint(websocket: WebSocket, path: str = ""):
 
         logging.info("Iniciando bucle principal para escuchar mensajes de Avaya...")
         
-        # Instancia para procesar el Batching de Avaya correctamente sin crashear
+        # Procesador de JSON robusto para manejar el batching de Avaya RCMS
         decoder = json.JSONDecoder()
         
         while True:
@@ -114,9 +119,7 @@ async def avaya_rcms_endpoint(websocket: WebSocket, path: str = ""):
             idx = 0
             msg_length = len(avaya_message)
             
-            # Procesar iterativamente cada objeto JSON concatenado en el string
             while idx < msg_length:
-                # Ignorar espacios en blanco/saltos de línea entre objetos
                 while idx < msg_length and avaya_message[idx].isspace():
                     idx += 1
                 if idx >= msg_length:
