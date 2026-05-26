@@ -5,8 +5,8 @@ import jwt
 import base64
 import logging
 import audioop
-import websockets
 import time
+import websockets
 from datetime import datetime, timezone
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 
@@ -22,6 +22,10 @@ OPENAI_WS_URL = "wss://api.openai.com/v1/realtime?model=gpt-realtime-mini"
 
 def get_current_timestamp():
     return datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.000Z')
+
+def get_ntp_micro():
+    """Genera la marca de tiempo NTP en microsegundos requerida por Avaya."""
+    return int(time.time() * 1_000_000)
 
 def verificar_token_avaya(auth_header: str):
     if not auth_header or not auth_header.startswith("Bearer "):
@@ -43,7 +47,6 @@ async def avaya_rcms_endpoint(websocket: WebSocket):
     session_id = None
     sequence_num = 1 
 
-    # Conexión directa al WebSocket Realtime de OpenAI
     headers = {
         "Authorization": f"Bearer {OPENAI_API_KEY}"
     }
@@ -54,31 +57,31 @@ async def avaya_rcms_endpoint(websocket: WebSocket):
 
             # TAREA 1: Escuchar a OpenAI y enviar a Avaya
             async def receive_from_openai():
+                avaya_asn = 1  # Contador de paquetes obligatorio para Avaya
+                
                 async for openai_message in openai_ws:
                     data = json.loads(openai_message)
                     
                     if data.get("type") == "response.audio.delta":
-                        # OpenAI envía PCM16 a 24kHz en Base64
+                        # 1. Transcodificar: PCM16 24kHz -> PCMU 8kHz
                         pcm_24k_bytes = base64.b64decode(data["delta"])
-                        
-                        # Transcodificar: PCM16 24kHz -> PCMU 8kHz
                         pcm_8k, _ = audioop.ratecv(pcm_24k_bytes, 2, 1, 24000, 8000, None)
                         pcmu_bytes = audioop.lin2ulaw(pcm_8k, 2)
                         
-                        # Enviar a Avaya en el formato requerido incluyendo el 'ts'
+                        # 2. Enviar a Avaya con los campos asn y ts (omitiendo src)
                         avaya_media_msg = {
                             "type": "media",
-                            "bid": 0, 
-                            "src": "rx",
-                            "ts": int(time.time() * 1_000_000), # NTP Timestamp en microsegundos
+                            "bid": 0,
+                            "asn": avaya_asn,
+                            "ts": get_ntp_micro(),
                             "audio": base64.b64encode(pcmu_bytes).decode('utf-8')
                         }
                         await websocket.send_text(json.dumps(avaya_media_msg))
+                        avaya_asn += 1
                     
                     elif data.get("type") == "error":
                         logging.error(f"Error de OpenAI: {data}")
 
-            # Iniciamos la tarea de escucha en segundo plano
             openai_listen_task = asyncio.create_task(receive_from_openai())
 
             # TAREA 2: Escuchar a Avaya y enviar a OpenAI
@@ -118,15 +121,24 @@ async def avaya_rcms_endpoint(websocket: WebSocket):
                         await websocket.send_text(json.dumps(response))
                         sequence_num += 1
 
-                        # Configurar la sesión de OpenAI sin el parámetro "type" inválido
+                        # 1. Configurar la sesión de OpenAI
                         session_update = {
                             "type": "session.update",
                             "session": {
                                 "type": "realtime",
-                                "instructions": "Eres un asistente de voz conciso. Responde rápidamente."
+                                "instructions": "Eres un asistente de voz amable. Habla en español. Responde de forma muy breve."
                             }
                         }
                         await openai_ws.send(json.dumps(session_update))
+
+                        # 2. FORZAR SALUDO: Hacemos que OpenAI hable de inmediato
+                        greeting = {
+                            "type": "response.create",
+                            "response": {
+                                "instructions": "Saluda al usuario inmediatamente diciendo: 'Hola, sistema de Avaya conectado. ¿Me escuchas?'."
+                            }
+                        }
+                        await openai_ws.send(json.dumps(greeting))
 
                     elif msg_type == "bot.start":
                         response = {
@@ -139,31 +151,16 @@ async def avaya_rcms_endpoint(websocket: WebSocket):
                         }
                         await websocket.send_text(json.dumps(response))
                         sequence_num += 1
-                        
-                    # Manejo del Keep-Alive de Avaya
-                    elif msg_type == "session.ping":
-                        response = {
-                            "version": "1.0.0",
-                            "type": "session.pong",
-                            "sessionId": session_id,
-                            "sequenceNum": sequence_num,
-                            "timestamp": get_current_timestamp()
-                        }
-                        await websocket.send_text(json.dumps(response))
-                        sequence_num += 1
 
                     elif msg_type == "media":
                         audio_base64 = data.get("audio")
                         
                         if audio_base64:
-                            # Recibimos audio PCMU 8kHz de Avaya 
                             pcmu_bytes = base64.b64decode(audio_base64)
                             
-                            # Transcodificar: PCMU 8kHz -> PCM16 24kHz para OpenAI
                             pcm_8k = audioop.ulaw2lin(pcmu_bytes, 2)
                             pcm_24k, _ = audioop.ratecv(pcm_8k, 2, 1, 8000, 24000, None)
                             
-                            # Enviar buffer de audio al websocket de OpenAI
                             openai_audio_msg = {
                                 "type": "input_audio_buffer.append",
                                 "audio": base64.b64encode(pcm_24k).decode('utf-8')
