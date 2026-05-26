@@ -50,8 +50,7 @@ def verificar_token_avaya(auth_header: str):
 agent = Agent(
     name="Assistant",
     instructions="Eres un asistente de voz útil y amable. Respondes de forma concisa.",
-    model="gpt-4o-realtime-preview-2024-12-17",
-    api_key=OPENAI_API_KEY  # <-- Aquí se inyecta la credencial explícitamente
+    model="gpt-4o-realtime-preview-2024-12-17"
 )
 
 # Clase auxiliar para convertir el flujo del WebSocket en un iterador asíncrono para AudioInput
