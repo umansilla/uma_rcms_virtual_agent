@@ -3,4 +3,5 @@ uvicorn
 websockets
 pyjwt
 python-dotenv
+g722
 openai-agents[voice]

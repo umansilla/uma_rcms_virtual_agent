@@ -13,6 +13,14 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from dotenv import load_dotenv
 load_dotenv()
 
+# Intentar importar la librería G.722
+try:
+    import G722 as g722
+    G722_AVAILABLE = True
+except ImportError:
+    G722_AVAILABLE = False
+    logging.warning("Módulo G722 no disponible. Instálalo con 'pip install g722' para mejor calidad de audio.")
+
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 app = FastAPI()
 
@@ -42,7 +50,11 @@ async def avaya_rcms_endpoint(websocket: WebSocket):
 
     session_id = None
     sequence_num = 1 
-    session_ingress_bid = 0  # Se actualizará dinámicamente
+    session_ingress_bid = 0
+    
+    # Variables de estado para la configuración negociada
+    active_codec = "PCMU"
+    active_sample_rate = 8000
 
     headers = {
         "Authorization": f"Bearer {OPENAI_API_KEY}"
@@ -52,7 +64,7 @@ async def avaya_rcms_endpoint(websocket: WebSocket):
         async with websockets.connect(OPENAI_WS_URL, additional_headers=headers) as openai_ws:
             logging.info("Conexión con OpenAI Realtime establecida.")
 
-            # TAREA 1: Escuchar a OpenAI y enviar a Avaya
+            # TAREA 1: Escuchar a OpenAI y enviar a Avaya (EGRESS -> INGRESS)
             async def receive_from_openai():
                 avaya_asn = 1
                 
@@ -60,19 +72,29 @@ async def avaya_rcms_endpoint(websocket: WebSocket):
                     data = json.loads(openai_message)
                     
                     if data.get("type") == "response.audio.delta":
-                        # 1. Transcodificar: PCM16 24kHz -> PCMU 8kHz
                         pcm_24k_bytes = base64.b64decode(data["delta"])
-                        pcm_8k, _ = audioop.ratecv(pcm_24k_bytes, 2, 1, 24000, 8000, None)
-                        pcmu_bytes = audioop.lin2ulaw(pcm_8k, 2)
                         
-                        # 2. Formatear paquete multimedia según el código de muestra
+                        # 1. Cambiar la frecuencia de muestreo de OpenAI a la de Avaya
+                        pcm_target, _ = audioop.ratecv(pcm_24k_bytes, 2, 1, 24000, active_sample_rate, None)
+                        
+                        # 2. Codificar al formato negociado por Avaya
+                        if active_codec == "PCMU":
+                            avaya_audio_bytes = audioop.lin2ulaw(pcm_target, 2)
+                        elif active_codec == "PCMA":
+                            avaya_audio_bytes = audioop.lin2alaw(pcm_target, 2)
+                        elif active_codec == "G722" and G722_AVAILABLE:
+                            avaya_audio_bytes = g722.encode(pcm_target)
+                        else:
+                            # Fallback seguro
+                            avaya_audio_bytes = audioop.lin2ulaw(pcm_target, 2)
+                        
+                        # 3. Formatear y enviar
                         avaya_media_msg = {
                             "type": "media",
-                            "bid": session_ingress_bid,  # <-- BID dinámico
+                            "bid": session_ingress_bid,
                             "asn": avaya_asn,
-                            "ts": int(time.time() * 1_000_000),  # <-- Microsegundos
-                            "audio": base64.b64encode(pcmu_bytes).decode('utf-8')
-                            # IMPORTANTE: El campo 'src' ha sido omitido intencionalmente
+                            "ts": int(time.time() * 1_000_000),
+                            "audio": base64.b64encode(avaya_audio_bytes).decode('utf-8')
                         }
                         await websocket.send_text(json.dumps(avaya_media_msg))
                         avaya_asn += 1
@@ -82,7 +104,7 @@ async def avaya_rcms_endpoint(websocket: WebSocket):
 
             openai_listen_task = asyncio.create_task(receive_from_openai())
 
-            # TAREA 2: Escuchar a Avaya y enviar a OpenAI
+            # TAREA 2: Escuchar a Avaya y enviar a OpenAI (INGRESS -> EGRESS)
             decoder = json.JSONDecoder()
             while True:
                 avaya_message = await websocket.receive_text()
@@ -102,14 +124,37 @@ async def avaya_rcms_endpoint(websocket: WebSocket):
                     if msg_type == "session.start":
                         session_id = data.get("sessionId")
                         
-                        # LECTURA DINÁMICA DEL BID DE INGRESO
+                        # 1. LEER LOS BIDS Y FLUJOS
                         media_endpoints = data.get("payload", {}).get("mediaEndpoints", [])
                         if media_endpoints:
                             flows = media_endpoints[0].get("flows", {}).get("audio", {})
                             ingress_info = flows.get("ingress", {})
                             session_ingress_bid = ingress_info.get("bid", 0)
-                            logging.info(f"Ingress BID detectado y configurado: {session_ingress_bid}")
 
+                        # 2. NEGOCIACIÓN DINÁMICA DE CÓDECS
+                        media_transports = data.get("payload", {}).get("mediaTransports", [])
+                        offered_codecs = media_transports[0].get("mediaCodecs", []) if media_transports else []
+                        
+                        selected_codec = None
+                        # Prioridad: G722 -> PCMU -> PCMA
+                        for pref in ["G722", "PCMU", "PCMA"]:
+                            if pref == "G722" and not G722_AVAILABLE:
+                                continue
+                            for c in offered_codecs:
+                                if c[1] == pref:
+                                    selected_codec = c
+                                    break
+                            if selected_codec:
+                                break
+                                
+                        if not selected_codec:
+                            selected_codec = ["audio", "PCMU", 8000, 1]  # Fallback extremo
+                            
+                        active_codec = selected_codec[1]
+                        active_sample_rate = selected_codec[2]
+                        logging.info(f"Códec negociado: {active_codec} a {active_sample_rate}Hz")
+
+                        # 3. RESPONDER CONFIGURANDO CÓDEC Y TRAMA (20ms)
                         response = {
                             "version": "1.0.0",
                             "type": "session.started",
@@ -120,7 +165,8 @@ async def avaya_rcms_endpoint(websocket: WebSocket):
                                 "services": ["bot"],
                                 "mediaTransport": {
                                     "type": "avaya-wss",
-                                    "mediaCodecs": [["audio", "PCMU", 8000, 1]],
+                                    "preferredPTimeMs": 20,          # <-- Configuración a 20ms
+                                    "mediaCodecs": [selected_codec], # <-- Se confirma el códec elegido
                                     "transportEncoding": "base64"
                                 }
                             }
@@ -133,7 +179,8 @@ async def avaya_rcms_endpoint(websocket: WebSocket):
                             "type": "session.update",
                             "session": {
                                 "type": "realtime",
-                                "instructions": "Eres un asistente de voz amable. Habla en español. Responde de forma muy breve."
+                                "instructions": "Eres un asistente de voz amable. Habla en español. Responde de forma muy breve.",
+                                "turn_detection": {"type": "server_vad"}
                             }
                         }
                         await openai_ws.send(json.dumps(session_update))
@@ -142,7 +189,7 @@ async def avaya_rcms_endpoint(websocket: WebSocket):
                         greeting = {
                             "type": "response.create",
                             "response": {
-                                "instructions": "Saluda al usuario inmediatamente diciendo: 'Hola, sistema de Avaya conectado. ¿Me escuchas?'."
+                                "instructions": "Saluda al usuario diciendo: 'Hola, el sistema está en línea'."
                             }
                         }
                         await openai_ws.send(json.dumps(greeting))
@@ -163,10 +210,20 @@ async def avaya_rcms_endpoint(websocket: WebSocket):
                         audio_base64 = data.get("audio")
                         
                         if audio_base64:
-                            pcmu_bytes = base64.b64decode(audio_base64)
+                            avaya_audio_bytes = base64.b64decode(audio_base64)
                             
-                            pcm_8k = audioop.ulaw2lin(pcmu_bytes, 2)
-                            pcm_24k, _ = audioop.ratecv(pcm_8k, 2, 1, 8000, 24000, None)
+                            # 1. Decodificar según el códec negociado
+                            if active_codec == "PCMU":
+                                pcm_native = audioop.ulaw2lin(avaya_audio_bytes, 2)
+                            elif active_codec == "PCMA":
+                                pcm_native = audioop.alaw2lin(avaya_audio_bytes, 2)
+                            elif active_codec == "G722" and G722_AVAILABLE:
+                                pcm_native = g722.decode(avaya_audio_bytes)
+                            else:
+                                pcm_native = audioop.ulaw2lin(avaya_audio_bytes, 2)
+                            
+                            # 2. Resamplear de la frecuencia nativa a los 24kHz de OpenAI
+                            pcm_24k, _ = audioop.ratecv(pcm_native, 2, 1, active_sample_rate, 24000, None)
                             
                             openai_audio_msg = {
                                 "type": "input_audio_buffer.append",
