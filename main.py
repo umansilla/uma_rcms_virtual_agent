@@ -6,6 +6,7 @@ import base64
 import logging
 import audioop
 import websockets
+import time
 from datetime import datetime, timezone
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 
@@ -64,11 +65,12 @@ async def avaya_rcms_endpoint(websocket: WebSocket):
                         pcm_8k, _ = audioop.ratecv(pcm_24k_bytes, 2, 1, 24000, 8000, None)
                         pcmu_bytes = audioop.lin2ulaw(pcm_8k, 2)
                         
-                        # Enviar a Avaya en el formato requerido
+                        # Enviar a Avaya en el formato requerido incluyendo el 'ts'
                         avaya_media_msg = {
                             "type": "media",
                             "bid": 0, 
                             "src": "rx",
+                            "ts": int(time.time() * 1_000_000), # NTP Timestamp en microsegundos
                             "audio": base64.b64encode(pcmu_bytes).decode('utf-8')
                         }
                         await websocket.send_text(json.dumps(avaya_media_msg))
@@ -116,11 +118,10 @@ async def avaya_rcms_endpoint(websocket: WebSocket):
                         await websocket.send_text(json.dumps(response))
                         sequence_num += 1
 
-                        # Configurar la sesión de OpenAI (voz, instrucciones, etc.)
+                        # Configurar la sesión de OpenAI sin el parámetro "type" inválido
                         session_update = {
                             "type": "session.update",
                             "session": {
-                                "type": "realtime",  # <-- PARÁMETRO REQUERIDO AGREGADO
                                 "instructions": "Eres un asistente de voz conciso. Responde rápidamente."
                             }
                         }
@@ -134,6 +135,18 @@ async def avaya_rcms_endpoint(websocket: WebSocket):
                             "sequenceNum": sequence_num,
                             "timestamp": get_current_timestamp(),
                             "payload": {"endpointId": data["payload"]["endpointId"]}
+                        }
+                        await websocket.send_text(json.dumps(response))
+                        sequence_num += 1
+                        
+                    # Manejo del Keep-Alive de Avaya
+                    elif msg_type == "session.ping":
+                        response = {
+                            "version": "1.0.0",
+                            "type": "session.pong",
+                            "sessionId": session_id,
+                            "sequenceNum": sequence_num,
+                            "timestamp": get_current_timestamp()
                         }
                         await websocket.send_text(json.dumps(response))
                         sequence_num += 1
