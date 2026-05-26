@@ -1,4 +1,6 @@
 fastapi
 uvicorn
 websockets
-PyJWT
+pyjwt
+python-dotenv
+openai-agents[voice]
