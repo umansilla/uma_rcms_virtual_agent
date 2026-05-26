@@ -44,8 +44,7 @@ async def avaya_rcms_endpoint(websocket: WebSocket):
 
     # Conexión directa al WebSocket Realtime de OpenAI
     headers = {
-        "Authorization": f"Bearer {OPENAI_API_KEY}",
-        "OpenAI-Beta": "realtime=v1"
+        "Authorization": f"Bearer {OPENAI_API_KEY}"
     }
 
     try:
