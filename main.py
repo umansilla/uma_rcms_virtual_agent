@@ -17,7 +17,7 @@ app = FastAPI()
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 AVAYA_SECRET_KEY = os.getenv("AVAYA_SECRET_KEY")
-OPENAI_WS_URL = "wss://api.openai.com/v1/realtime?model=gpt-4o-mini-audio-preview-2024-12-17"
+OPENAI_WS_URL = "wss://api.openai.com/v1/realtime?model=gpt-realtime-mini"
 
 def get_current_timestamp():
     return datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.000Z')
@@ -122,8 +122,6 @@ async def avaya_rcms_endpoint(websocket: WebSocket):
                             "session": {
                                 "type": "realtime",  # <-- PARÁMETRO REQUERIDO AGREGADO
                                 "instructions": "Eres un asistente de voz conciso. Responde rápidamente.",
-                                "modalities": ["text", "audio"],
-                                "voice": "alloy",
                                 "turn_detection": {"type": "server_vad"}
                             }
                         }
