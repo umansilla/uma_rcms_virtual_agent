@@ -23,10 +23,6 @@ OPENAI_WS_URL = "wss://api.openai.com/v1/realtime?model=gpt-realtime-mini"
 def get_current_timestamp():
     return datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.000Z')
 
-def get_ntp_micro():
-    """Genera la marca de tiempo NTP en microsegundos requerida por Avaya."""
-    return int(time.time() * 1_000_000)
-
 def verificar_token_avaya(auth_header: str):
     if not auth_header or not auth_header.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Token faltante")
@@ -46,6 +42,7 @@ async def avaya_rcms_endpoint(websocket: WebSocket):
 
     session_id = None
     sequence_num = 1 
+    session_ingress_bid = 0  # Se actualizará dinámicamente
 
     headers = {
         "Authorization": f"Bearer {OPENAI_API_KEY}"
@@ -57,7 +54,7 @@ async def avaya_rcms_endpoint(websocket: WebSocket):
 
             # TAREA 1: Escuchar a OpenAI y enviar a Avaya
             async def receive_from_openai():
-                avaya_asn = 1  # Contador de paquetes obligatorio para Avaya
+                avaya_asn = 1
                 
                 async for openai_message in openai_ws:
                     data = json.loads(openai_message)
@@ -68,13 +65,14 @@ async def avaya_rcms_endpoint(websocket: WebSocket):
                         pcm_8k, _ = audioop.ratecv(pcm_24k_bytes, 2, 1, 24000, 8000, None)
                         pcmu_bytes = audioop.lin2ulaw(pcm_8k, 2)
                         
-                        # 2. Enviar a Avaya con los campos asn y ts (omitiendo src)
+                        # 2. Formatear paquete multimedia según el código de muestra
                         avaya_media_msg = {
                             "type": "media",
-                            "bid": 0,
+                            "bid": session_ingress_bid,  # <-- BID dinámico
                             "asn": avaya_asn,
-                            "ts": get_ntp_micro(),
+                            "ts": int(time.time() * 1_000_000),  # <-- Microsegundos
                             "audio": base64.b64encode(pcmu_bytes).decode('utf-8')
+                            # IMPORTANTE: El campo 'src' ha sido omitido intencionalmente
                         }
                         await websocket.send_text(json.dumps(avaya_media_msg))
                         avaya_asn += 1
@@ -103,6 +101,15 @@ async def avaya_rcms_endpoint(websocket: WebSocket):
 
                     if msg_type == "session.start":
                         session_id = data.get("sessionId")
+                        
+                        # LECTURA DINÁMICA DEL BID DE INGRESO
+                        media_endpoints = data.get("payload", {}).get("mediaEndpoints", [])
+                        if media_endpoints:
+                            flows = media_endpoints[0].get("flows", {}).get("audio", {})
+                            ingress_info = flows.get("ingress", {})
+                            session_ingress_bid = ingress_info.get("bid", 0)
+                            logging.info(f"Ingress BID detectado y configurado: {session_ingress_bid}")
+
                         response = {
                             "version": "1.0.0",
                             "type": "session.started",
@@ -121,7 +128,7 @@ async def avaya_rcms_endpoint(websocket: WebSocket):
                         await websocket.send_text(json.dumps(response))
                         sequence_num += 1
 
-                        # 1. Configurar la sesión de OpenAI
+                        # Configurar sesión en OpenAI
                         session_update = {
                             "type": "session.update",
                             "session": {
@@ -131,7 +138,7 @@ async def avaya_rcms_endpoint(websocket: WebSocket):
                         }
                         await openai_ws.send(json.dumps(session_update))
 
-                        # 2. FORZAR SALUDO: Hacemos que OpenAI hable de inmediato
+                        # Forzar saludo inicial de la IA
                         greeting = {
                             "type": "response.create",
                             "response": {
@@ -168,7 +175,7 @@ async def avaya_rcms_endpoint(websocket: WebSocket):
                             await openai_ws.send(json.dumps(openai_audio_msg))
 
     except WebSocketDisconnect:
-        logging.warning(f"Desconexión del WebSocket de Avaya.")
+        logging.warning("Desconexión del WebSocket de Avaya.")
         if 'openai_listen_task' in locals():
             openai_listen_task.cancel()
     except Exception as e:
