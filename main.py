@@ -121,8 +121,7 @@ async def avaya_rcms_endpoint(websocket: WebSocket):
                             "type": "session.update",
                             "session": {
                                 "type": "realtime",  # <-- PARÁMETRO REQUERIDO AGREGADO
-                                "instructions": "Eres un asistente de voz conciso. Responde rápidamente.",
-                                "turn_detection": {"type": "server_vad"}
+                                "instructions": "Eres un asistente de voz conciso. Responde rápidamente."
                             }
                         }
                         await openai_ws.send(json.dumps(session_update))
