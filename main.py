@@ -122,6 +122,7 @@ async def avaya_rcms_endpoint(websocket: WebSocket):
                             "session": {
                                 "type": "realtime",  # <-- PARÁMETRO REQUERIDO AGREGADO
                                 "instructions": "Eres un asistente de voz conciso. Responde rápidamente.",
+                                "modalities": ["text", "audio"],
                                 "voice": "alloy",
                                 "turn_detection": {"type": "server_vad"}
                             }
