@@ -122,6 +122,7 @@ async def avaya_rcms_endpoint(websocket: WebSocket):
                         session_update = {
                             "type": "session.update",
                             "session": {
+                                "type": "realtime",
                                 "instructions": "Eres un asistente de voz conciso. Responde rápidamente."
                             }
                         }
